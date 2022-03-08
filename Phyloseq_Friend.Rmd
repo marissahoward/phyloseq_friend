@@ -1,0 +1,115 @@
+---
+title: "Phyloseq Friend"
+author: "Marissa Howard and William Norfolk"
+date: "3/8/2022"
+output: html_document
+---
+
+```{r}
+#library your needed packages 
+library(phyloseq)
+library(tidyverse)
+
+# import and melt youur phyloseq obeject
+phyloseq_object <- readRDS("~Path/To/Your/Phyloseq_Object.rds")
+clean_dataset <- psmelt(phyloseq_object)
+```
+
+
+```{r}
+#Find contamination from negative samples using a Sink_or_Source column found in the metadata map
+
+identify_contamination <- function(clean_dataset){
+#identify sources of contamination (i.e., OTUs in the negatives)
+find_contamination <- clean_dataset %>% subset(Sink_or_Source == "source")
+
+#remove any OTUs that have 0 abundance (this should do nothing, but can modify the ZERO value if a higher threshold is desired)
+find_contamination <- find_contamination[!(find_contamination$Abundance == 0), ] 
+
+#identiy all unique "contaminating OTUs" and add a "contamination" tag column to the dataset
+contaminating_otus <- as.data.frame(unique(find_contamination$OTU)) %>%
+  rename(OTU = `unique(find_contamination$OTU)`) %>%
+  mutate(tag = "contamination")
+
+#rejoin the contamination labels to the parent dataframe
+label_contamination <- clean_dataset %>% left_join(contaminating_otus)
+
+#add a "not contamination" label to any OTUs that are true sample OTUs
+label_contamination$tag[is.na(label_contamination$tag)] <- "not contamination"
+
+return(label_contamination)
+}
+
+```
+
+```{r}
+#make two dataframes, one with contamination and one without. 
+#If you get an error about the "unique(find_contamination$OTU)" object not being found, it is because the rename command in base R has been overridden by one of your packages. You'll have to restart R and use only the packages needed for this script.
+with_contamination <- identify_contamination(clean_dataset)
+without_contamination <- with_contamination[!(with_contamination$tag == "contamination"), ]
+
+#Save the dataframes in case you have to come back to them.
+saveRDS(with_contamination, "/Path/To/Where/You/Save/with_contamination.rds")
+saveRDS(without_contamination, "/Path/To/Where/You/Save/without_contamination.rds")
+```
+
+```{r}
+#Remove Abundances below a certain threshold in your without_coontamination dataframe
+remove_x_abundance <- function(dataframe, threshold_limit){
+
+find_porportions <- dataframe %>% 
+  select(c(OTU, Abundance)) %>%
+  group_by(OTU) %>%
+  summarize_if(is.numeric, sum) %>%
+  ungroup() %>%
+  rename(total_abundance = Abundance) #creates a total_abundance column to join to the parent dataset
+
+#merge the total_abundance per sample calculation to the parent dataset then transform these values into a percentage
+label_contamination <- without_contamination %>% left_join(find_porportions) %>%
+  mutate(otu_percentage = Abundance/total_abundance*100)
+
+#tag otu's that are below .55% as contamination
+
+make_this <- label_contamination %>% mutate(threshold = case_when(
+  .$otu_percentage <= threshold_limit ~ "Below Threshold",
+  TRUE ~ "Above Threshold"))
+
+return(make_this)
+}
+
+label_thresholds <- remove_x_abundance(without_contamination, 0.55)
+
+only_above_threshold <- label_thresholds %>% subset(threshold == "Above Threshold")
+only_below_threshold <- label_thresholds %>% subset(threshold == "Below Threshold")
+
+#Save those dataframes!!!
+saveRDS(only_above_threshold, "/Path/To/Where/You/Save/above_threshold.rds")
+saveRDS(only_below_threshold, "/Path/To/Where/You/Save/below_threshold.rds")
+```
+
+```{r}
+#convert above_threshold data frame back into phyloseq object
+new_otu_dec <- only_above_threshold %>% select(c(OTU, Sample, Abundace)) %>% pivot_wider(names_from = "OTU", values_from = "Abundance") 
+new_otu_row <- new_otu_dec$Sample
+new_otu_dec <- new_otu_dec %>% select(-Sample)
+row.names(new_otu_dec) <- new_otu_row
+new_otu_table <- as.matrix(new_otu_dec)
+
+```
+
+```{r}
+#Reconstruct phyloseq object 
+#pull components you need from old phyloseq object
+tax <- tax_table(phyloseq_object)
+tree <- phy_tree(phyloseq_object)
+metadata <- sample_data(phyloseq_object)
+
+#Create new phyloseq object with new otu table and old components
+new_phyloseq_object <- phyloseq(otu_table(new_otu_table, taxa_are_rows=FALSE),
+               tax_table(tax),
+               phy_tree(tree),
+               sample_data(metadata))
+
+#Save the new phyloseq object 
+saveRDS(new_phyloseq_object, "/Path/To/Where/You/Save/below_threshold.rds")
+```
